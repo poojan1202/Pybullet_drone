@@ -1,0 +1,1 @@
+ppo_hover_1 trained with new reward function for 500000 steps.
