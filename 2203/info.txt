@@ -1,1 +1,1 @@
-New Model trained on the new reward function for 1000000 steps.
+ppo_hover_1 trained with new reward function for 1000000 steps.
