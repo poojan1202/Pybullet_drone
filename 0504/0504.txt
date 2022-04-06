@@ -1,0 +1,1 @@
+training previous model after removing clipping
