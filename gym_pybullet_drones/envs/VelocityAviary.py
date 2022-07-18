@@ -1,10 +1,13 @@
+import os
 import numpy as np
 from gym import spaces
 
 from gym_pybullet_drones.envs.BaseAviary import DroneModel, Physics, BaseAviary
+from gym_pybullet_drones.control.DSLPIDControl import DSLPIDControl
+from gym_pybullet_drones.control.SimplePIDControl import SimplePIDControl
 
-class CtrlAviary(BaseAviary):
-    """Multi-drone environment class for control applications."""
+class VelocityAviary(BaseAviary):
+    """Multi-drone environment class for high-level planning."""
 
     ################################################################################
 
@@ -22,7 +25,7 @@ class CtrlAviary(BaseAviary):
                  obstacles=False,
                  user_debug_gui=True
                  ):
-        """Initialization of an aviary environment for control applications.
+        """Initialization of an aviary environment for or high-level planning.
 
         Parameters
         ----------
@@ -52,6 +55,12 @@ class CtrlAviary(BaseAviary):
             Whether to draw the drones' axes and the GUI RPMs sliders.
 
         """
+        #### Create integrated controllers #########################
+        os.environ['KMP_DUPLICATE_LIB_OK']='True'
+        if drone_model in [DroneModel.CF2X, DroneModel.CF2P]:
+            self.ctrl = [DSLPIDControl(drone_model=DroneModel.CF2X) for i in range(num_drones)]
+        elif drone_model == DroneModel.HB:
+            self.ctrl = [SimplePIDControl(drone_model=DroneModel.HB) for i in range(num_drones)]
         super().__init__(drone_model=drone_model,
                          num_drones=num_drones,
                          neighbourhood_radius=neighbourhood_radius,
@@ -65,6 +74,8 @@ class CtrlAviary(BaseAviary):
                          obstacles=obstacles,
                          user_debug_gui=user_debug_gui
                          )
+        #### Set a limit on the maximum target speed ###############
+        self.SPEED_LIMIT = 0.03 * self.MAX_SPEED_KMH * (1000/3600)
 
     ################################################################################
 
@@ -78,9 +89,9 @@ class CtrlAviary(BaseAviary):
             indexed by drone Id in string format.
 
         """
-        #### Action vector ######## P0            P1            P2            P3
-        act_lower_bound = np.array([0.,           0.,           0.,           0.])
-        act_upper_bound = np.array([self.MAX_RPM, self.MAX_RPM, self.MAX_RPM, self.MAX_RPM])
+        #### Action vector ######### X       Y       Z   fract. of MAX_SPEED_KMH
+        act_lower_bound = np.array([-1,     -1,     -1,                        0])
+        act_upper_bound = np.array([ 1,      1,      1,                        1])
         return spaces.Dict({str(i): spaces.Box(low=act_lower_bound,
                                                high=act_upper_bound,
                                                dtype=np.float32
@@ -133,12 +144,13 @@ class CtrlAviary(BaseAviary):
                           ):
         """Pre-processes the action passed to `.step()` into motors' RPMs.
 
-        Clips and converts a dictionary into a 2D array.
+        Uses PID control to target a desired velocity vector.
+        Converts a dictionary into a 2D array.
 
         Parameters
         ----------
         action : dict[str, ndarray]
-            The (unbounded) input action for each drone, to be translated into feasible RPMs.
+            The desired velocity input for each drone, to be translated into RPMs.
 
         Returns
         -------
@@ -147,10 +159,26 @@ class CtrlAviary(BaseAviary):
             commanded to the 4 motors of each drone.
 
         """
-        clipped_action = np.zeros((self.NUM_DRONES, 4))
+        rpm = np.zeros((self.NUM_DRONES, 4))
         for k, v in action.items():
-            clipped_action[int(k), :] = np.clip(np.array(v), 0, self.MAX_RPM)
-        return clipped_action
+            #### Get the current state of the drone  ###################
+            state = self._getDroneStateVector(int(k))
+            #### Normalize the first 3 components of the target velocity
+            if np.linalg.norm(v[0:3]) != 0:
+                v_unit_vector = v[0:3] / np.linalg.norm(v[0:3])
+            else:
+                v_unit_vector = np.zeros(3)
+            temp, _, _ = self.ctrl[int(k)].computeControl(control_timestep=self.AGGR_PHY_STEPS*self.TIMESTEP, 
+                                                    cur_pos=state[0:3],
+                                                    cur_quat=state[3:7],
+                                                    cur_vel=state[10:13],
+                                                    cur_ang_vel=state[13:16],
+                                                    target_pos=state[0:3], # same as the current position
+                                                    target_rpy=np.array([0,0,state[9]]), # keep current yaw
+                                                    target_vel=self.SPEED_LIMIT * np.abs(v[3]) * v_unit_vector # target the desired velocity vector
+                                                    )
+            rpm[int(k),:] = temp
+        return rpm
 
     ################################################################################
 

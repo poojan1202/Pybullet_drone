@@ -144,7 +144,10 @@ class BaseAviary(gym.Env):
         self.HOVER_RPM = np.sqrt(self.GRAVITY / (4*self.KF))
         self.MAX_RPM = np.sqrt((self.THRUST2WEIGHT_RATIO*self.GRAVITY) / (4*self.KF))
         self.MAX_THRUST = (4*self.KF*self.MAX_RPM**2)
-        self.MAX_XY_TORQUE = (self.L*self.KF*self.MAX_RPM**2)
+        if self.DRONE_MODEL == DroneModel.CF2X:
+            self.MAX_XY_TORQUE = (2*self.L*self.KF*self.MAX_RPM**2)/np.sqrt(2)
+        elif self.DRONE_MODEL in [DroneModel.CF2P, DroneModel.HB]:
+            self.MAX_XY_TORQUE = (self.L*self.KF*self.MAX_RPM**2)
         self.MAX_Z_TORQUE = (2*self.KM*self.MAX_RPM**2)
         self.GND_EFF_H_CLIP = 0.25 * self.PROP_RADIUS * np.sqrt((15 * self.MAX_RPM**2 * self.KF * self.GND_EFF_COEFF) / self.MAX_THRUST)
         #### Create attributes for vision tasks ####################
@@ -166,7 +169,7 @@ class BaseAviary(gym.Env):
         self.DYNAMICS_ATTR = dynamics_attributes
         if self.DYNAMICS_ATTR:
             if self.DRONE_MODEL == DroneModel.CF2X:
-                self.A = np.array([ [1, 1, 1, 1], [.5, .5, -.5, -.5], [-.5, .5, .5, -.5], [-1, 1, -1, 1] ])
+                self.A = np.array([ [1, 1, 1, 1], [1/np.sqrt(2), 1/np.sqrt(2), -1/np.sqrt(2), -1/np.sqrt(2)], [-1/np.sqrt(2), 1/np.sqrt(2), 1/np.sqrt(2), -1/np.sqrt(2)], [-1, 1, -1, 1] ])
             elif self.DRONE_MODEL in [DroneModel.CF2P, DroneModel.HB]:
                 self.A = np.array([ [1, 1, 1, 1], [0, 1, 0, -1], [-1, 0, 1, 0], [-1, 1, -1, 1] ])
             self.INV_A = np.linalg.inv(self.A)
@@ -366,8 +369,7 @@ class BaseAviary(gym.Env):
             if self.PHYSICS != Physics.DYN:
                 p.stepSimulation(physicsClientId=self.CLIENT)
             #### Save the last applied action (e.g. to compute drag) ###
-            if self.PHYSICS in [Physics.PYB_DRAG, Physics.PYB_GND_DRAG_DW]:
-                self.last_clipped_action = clipped_action
+            self.last_clipped_action = clipped_action
         #### Update and store the drones kinematic information #####
         self._updateAndStoreKinematicInformation()
         #### Prepare the return values #############################
@@ -406,7 +408,7 @@ class BaseAviary(gym.Env):
                   "——— x {:+06.2f}, y {:+06.2f}, z {:+06.2f}".format(self.pos[i, 0], self.pos[i, 1], self.pos[i, 2]),
                   "——— velocity {:+06.2f}, {:+06.2f}, {:+06.2f}".format(self.vel[i, 0], self.vel[i, 1], self.vel[i, 2]),
                   "——— roll {:+06.2f}, pitch {:+06.2f}, yaw {:+06.2f}".format(self.rpy[i, 0]*self.RAD2DEG, self.rpy[i, 1]*self.RAD2DEG, self.rpy[i, 2]*self.RAD2DEG),
-                  "——— angular velocities {:+06.2f}, {:+06.2f}, {:+06.2f} ——— ".format(self.ang_v[i, 0]*self.RAD2DEG, self.ang_v[i, 1]*self.RAD2DEG, self.ang_v[i, 2]*self.RAD2DEG))
+                  "——— angular velocity {:+06.4f}, {:+06.4f}, {:+06.4f} ——— ".format(self.ang_v[i, 0], self.ang_v[i, 1], self.ang_v[i, 2]))
     
     ################################################################################
 
@@ -471,6 +473,8 @@ class BaseAviary(gym.Env):
         self.rpy = np.zeros((self.NUM_DRONES, 3))
         self.vel = np.zeros((self.NUM_DRONES, 3))
         self.ang_v = np.zeros((self.NUM_DRONES, 3))
+        if self.PHYSICS == Physics.DYN:
+            self.rpy_rates = np.zeros((self.NUM_DRONES, 3))
         #### Set PyBullet's parameters #############################
         p.setGravity(0, 0, -self.G, physicsClientId=self.CLIENT)
         p.setRealTimeSimulation(0, physicsClientId=self.CLIENT)
@@ -548,7 +552,7 @@ class BaseAviary(gym.Env):
 
         """
         state = np.hstack([self.pos[nth_drone, :], self.quat[nth_drone, :], self.rpy[nth_drone, :],
-                           self.vel[nth_drone, :], self.ang_v[nth_drone, :], self.last_action[nth_drone, :]])
+                           self.vel[nth_drone, :], self.ang_v[nth_drone, :], self.last_clipped_action[nth_drone, :]])
         return state.reshape(20,)
 
     ################################################################################
@@ -824,7 +828,7 @@ class BaseAviary(gym.Env):
         quat = self.quat[nth_drone,:]
         rpy = self.rpy[nth_drone,:]
         vel = self.vel[nth_drone,:]
-        ang_v = self.ang_v[nth_drone,:]
+        rpy_rates = self.rpy_rates[nth_drone,:]
         rotation = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
         #### Compute forces and torques ############################
         forces = np.array(rpm**2) * self.KF
@@ -840,35 +844,28 @@ class BaseAviary(gym.Env):
             x_torque = (forces[1] - forces[3]) * self.L
             y_torque = (-forces[0] + forces[2]) * self.L
         torques = np.array([x_torque, y_torque, z_torque])
-        torques = torques - np.cross(ang_v, np.dot(self.J, ang_v))
-        ang_vel_deriv = np.dot(self.J_INV, torques)
+        torques = torques - np.cross(rpy_rates, np.dot(self.J, rpy_rates))
+        rpy_rates_deriv = np.dot(self.J_INV, torques)
         no_pybullet_dyn_accs = force_world_frame / self.M
         #### Update state ##########################################
         vel = vel + self.TIMESTEP * no_pybullet_dyn_accs
-        ang_v = ang_v + self.TIMESTEP * ang_vel_deriv
+        rpy_rates = rpy_rates + self.TIMESTEP * rpy_rates_deriv
         pos = pos + self.TIMESTEP * vel
-        rpy = rpy + self.TIMESTEP * ang_v
+        rpy = rpy + self.TIMESTEP * rpy_rates
         #### Set PyBullet's state ##################################
         p.resetBasePositionAndOrientation(self.DRONE_IDS[nth_drone],
                                           pos,
                                           p.getQuaternionFromEuler(rpy),
                                           physicsClientId=self.CLIENT
                                           )
+        #### Note: the base's velocity only stored and not used ####
         p.resetBaseVelocity(self.DRONE_IDS[nth_drone],
                             vel,
-                            ang_v,
+                            [-1, -1, -1], # ang_vel not computed by DYN
                             physicsClientId=self.CLIENT
                             )
-
-    ####################################################################################################
-    #### Denormalize the [-1,1] range to the [0, MAX RPM] range ########################################
-    ####################################################################################################
-    #### Arguments #####################################################################################
-    #### - action ((4,1) array)             normalized [-1,1] actions applied to the 4 motors ##########
-    ####################################################################################################
-    #### Returns #######################################################################################
-    #### - rpm ((4,1) array)                RPM values to apply to the 4 motors ########################
-    ####################################################################################################
+        #### Store the roll, pitch, yaw rates for the next step ####
+        self.rpy_rates[nth_drone,:] = rpy_rates
     
     ################################################################################
 
@@ -891,13 +888,6 @@ class BaseAviary(gym.Env):
         if np.any(np.abs(action)) > 1:
             print("\n[ERROR] it", self.step_counter, "in BaseAviary._normalizedActionToRPM(), out-of-bound action")
         return np.where(action <= 0, (action+1)*self.HOVER_RPM, action*self.MAX_RPM) # Non-linear mapping: -1 -> 0, 0 -> HOVER_RPM, 1 -> MAX_RPM
-
-    ####################################################################################################
-    #### Save an action into self.last_action disambiguating between array and dict inputs #############
-    ####################################################################################################
-    #### Arguments #####################################################################################
-    #### - action ((4,1) array or dict)     an array or a dict of arrays to be stored in last_action ###
-    ####################################################################################################
     
     ################################################################################
 

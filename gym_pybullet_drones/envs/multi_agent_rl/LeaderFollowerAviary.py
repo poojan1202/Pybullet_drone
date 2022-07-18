@@ -85,10 +85,11 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
 
         """
         rewards = {}
-        states = np.array([self._getDroneStateVector(0) for i in range(self.NUM_DRONES)])
-        rewards[0] = -1 * np.linalg.norm(np.array([1, 1, 1]) - states[0, 0:3])**2
+        states = np.array([self._getDroneStateVector(i) for i in range(self.NUM_DRONES)])
+        rewards[0] = -1 * np.linalg.norm(np.array([0, 0, 0.5]) - states[0, 0:3])**2
+        # rewards[1] = -1 * np.linalg.norm(np.array([states[1, 0], states[1, 1], 0.5]) - states[1, 0:3])**2 # DEBUG WITH INDEPENDENT REWARD 
         for i in range(1, self.NUM_DRONES):
-            rewards[i] = -1 * np.linalg.norm(states[i-1, 0:3] - states[i, 0:3])**2
+            rewards[i] = -(1/self.NUM_DRONES) * np.linalg.norm(np.array([states[i, 0], states[i, 1], states[0, 2]]) - states[i, 0:3])**2
         return rewards
 
     ################################################################################
@@ -105,7 +106,7 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
         """
         bool_val = True if self.step_counter/self.SIM_FREQ > self.EPISODE_LEN_SEC else False
         done = {i: bool_val for i in range(self.NUM_DRONES)}
-        done["__all__"] = True if True in done.values() else False
+        done["__all__"] = bool_val # True if True in done.values() else False
         return done
 
     ################################################################################
@@ -148,8 +149,6 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
         MAX_Z = MAX_LIN_VEL_Z*self.EPISODE_LEN_SEC
 
         MAX_PITCH_ROLL = np.pi # Full range
-        MAX_PITCH_ROLL_VEL = 6*np.pi
-        MAX_YAW_VEL = 3*np.pi
 
         clipped_pos_xy = np.clip(state[0:2], -MAX_XY, MAX_XY)
         clipped_pos_z = np.clip(state[2], 0, MAX_Z)
@@ -157,18 +156,13 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
         clipped_vel_xy = np.clip(state[10:12], -MAX_LIN_VEL_XY, MAX_LIN_VEL_XY)
         clipped_vel_z = np.clip(state[12], -MAX_LIN_VEL_Z, MAX_LIN_VEL_Z)
 
-        clipped_ang_vel_rp = np.clip(state[13:15], -MAX_PITCH_ROLL_VEL, MAX_PITCH_ROLL_VEL)
-        clipped_ang_vel_y = np.clip(state[15], -MAX_YAW_VEL, MAX_YAW_VEL)
-
         if self.GUI:
             self._clipAndNormalizeStateWarning(state,
                                                clipped_pos_xy,
                                                clipped_pos_z,
                                                clipped_rp,
                                                clipped_vel_xy,
-                                               clipped_vel_z,
-                                               clipped_ang_vel_rp,
-                                               clipped_ang_vel_y
+                                               clipped_vel_z
                                                )
 
         normalized_pos_xy = clipped_pos_xy / MAX_XY
@@ -177,8 +171,7 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
         normalized_y = state[9] / np.pi # No reason to clip
         normalized_vel_xy = clipped_vel_xy / MAX_LIN_VEL_XY
         normalized_vel_z = clipped_vel_z / MAX_LIN_VEL_XY
-        normalized_ang_vel_rp = clipped_ang_vel_rp / MAX_PITCH_ROLL_VEL
-        normalized_ang_vel_y = clipped_ang_vel_y / MAX_YAW_VEL
+        normalized_ang_vel = state[13:16]/np.linalg.norm(state[13:16]) if np.linalg.norm(state[13:16]) != 0 else state[13:16]
 
         norm_and_clipped = np.hstack([normalized_pos_xy,
                                       normalized_pos_z,
@@ -187,15 +180,14 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
                                       normalized_y,
                                       normalized_vel_xy,
                                       normalized_vel_z,
-                                      normalized_ang_vel_rp,
-                                      normalized_ang_vel_y,
+                                      normalized_ang_vel,
                                       state[16:20]
                                       ]).reshape(20,)
 
         return norm_and_clipped
-
+    
     ################################################################################
-
+    
     def _clipAndNormalizeStateWarning(self,
                                       state,
                                       clipped_pos_xy,
@@ -203,12 +195,10 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
                                       clipped_rp,
                                       clipped_vel_xy,
                                       clipped_vel_z,
-                                      clipped_ang_vel_rp,
-                                      clipped_ang_vel_y
                                       ):
         """Debugging printouts associated to `_clipAndNormalizeState`.
 
-        Print a warning if any of the 20 values in a state vector is out of the normalization range.
+        Print a warning if values in a state vector is out of the clipping range.
         
         """
         if not(clipped_pos_xy == np.array(state[0:2])).all():
@@ -221,7 +211,3 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
             print("[WARNING] it", self.step_counter, "in LeaderFollowerAviary._clipAndNormalizeState(), clipped xy velocity [{:.2f} {:.2f}]".format(state[10], state[11]))
         if not(clipped_vel_z == np.array(state[12])).all():
             print("[WARNING] it", self.step_counter, "in LeaderFollowerAviary._clipAndNormalizeState(), clipped z velocity [{:.2f}]".format(state[12]))
-        if not(clipped_ang_vel_rp == np.array(state[13:15])).all():
-            print("[WARNING] it", self.step_counter, "in LeaderFollowerAviary._clipAndNormalizeState(), clipped angular velocity [{:.2f} {:.2f}]".format(state[13], state[14]))
-        if not(clipped_ang_vel_y == np.array(state[15])):
-            print("[WARNING] it", self.step_counter, "in LeaderFollowerAviary._clipAndNormalizeState(), clipped angular velocity [{:.2f}]".format(state[15]))
